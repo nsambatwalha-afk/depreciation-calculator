@@ -5,6 +5,18 @@ from datetime import timedelta
 
 st.set_page_config(page_title="Depreciation Calculator", layout="wide")
 
+# ----------------------------------------------------
+# EXPECTED FAR FORMAT
+# ----------------------------------------------------
+EXPECTED_COLUMNS = [
+    "Asset ID",
+    "Asset Name",
+    "Asset Category",
+    "Cost",
+    "Rate",
+    "Acquisition Date"
+]
+
 
 # ----------------------------------------------------
 # STRAIGHT LINE CALCULATOR
@@ -30,22 +42,16 @@ def calculator(cost, acquisition_date, period_start, period_end, rate):
 
 
 # ----------------------------------------------------
-# REDUCING BALANCE CALCULATOR (YOU WILL IMPLEMENT)
+# REDUCING BALANCE CALCULATOR
 # ----------------------------------------------------
 def calculator2(cost, acquisition_date, period_start, period_end, rate):
-    """
-    Reducing balance depreciation
-    """
 
-    # useful life
     ul_days = int((1 / rate) * 365)
     eol = acquisition_date + timedelta(days=ul_days)
 
-    # if asset already fully depreciated
     if period_start >= eol:
         return 0.0
 
-    # determine start of depreciation in this period
     dep_start = max(acquisition_date, period_start)
     dep_end = min(period_end, eol)
 
@@ -54,14 +60,11 @@ def calculator2(cost, acquisition_date, period_start, period_end, rate):
     if dep_days <= 0:
         return 0.0
 
-    # years passed before this period
     days_before_period = (dep_start - acquisition_date).days
     years_elapsed = days_before_period / 365
 
-    # opening book value at start of period
     book_value = cost * ((1 - rate) ** years_elapsed)
 
-    # daily reducing balance depreciation
     dep_daily = (rate * book_value) / 365
 
     return dep_daily * dep_days
@@ -85,7 +88,6 @@ def calculate_depreciation(far_df, period_start, period_end, method):
 
         acquisition_date = row["Acquisition Date"].date()
 
-        # choose calculator
         if method == "Straight Line":
             depreciation = calculator(
                 cost,
@@ -149,7 +151,10 @@ st.download_button(
 
 
 # upload FAR
-uploaded_file = st.file_uploader("Upload FAR file", type=["xlsx"])
+uploaded_file = st.file_uploader(
+    "Upload FAR file in the format of the template",
+    type=["xlsx"]
+)
 
 
 if uploaded_file:
@@ -157,6 +162,32 @@ if uploaded_file:
     far_df = pd.read_excel(uploaded_file)
     far_df = far_df.dropna(how="all")
 
+    # ----------------------------------------------------
+    # VALIDATE COLUMN FORMAT
+    # ----------------------------------------------------
+    uploaded_columns = list(far_df.columns)
+
+    missing_columns = set(EXPECTED_COLUMNS) - set(uploaded_columns)
+    extra_columns = set(uploaded_columns) - set(EXPECTED_COLUMNS)
+
+    if missing_columns or extra_columns:
+
+        st.error(
+            "The uploaded FAR does not match the required template format. "
+            "Please download and use the provided template."
+        )
+
+        if missing_columns:
+            st.write("Missing columns:", list(missing_columns))
+
+        if extra_columns:
+            st.write("Unexpected columns:", list(extra_columns))
+
+        st.stop()
+
+    # ----------------------------------------------------
+    # DATE PARSING
+    # ----------------------------------------------------
     far_df["Acquisition Date"] = pd.to_datetime(
         far_df["Acquisition Date"],
         dayfirst=True
@@ -176,9 +207,7 @@ if uploaded_file:
     with col2:
         period_end = st.date_input("Period End")
 
-    # -------------------------
-    # NEW: METHOD DROPDOWN
-    # -------------------------
+    # method dropdown
     method = st.selectbox(
         "Depreciation Method",
         ["Straight Line", "Reducing Balance"]
