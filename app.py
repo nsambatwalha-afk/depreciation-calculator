@@ -132,7 +132,7 @@ def calculate_depreciation(far_df, period_start, period_end, method):
 st.title("Asset Depreciation Calculator")
 
 st.write(
-    "Upload the Fixed Asset Register (FAR) to calculate depreciation."
+    "Upload the Fixed Asset Register (FAR) in the format of the template to calculate depreciation."
 )
 
 
