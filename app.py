@@ -96,6 +96,8 @@ def calculate_depreciation(far_df, period_start, period_end, method):
                 period_end,
                 rate
             )
+            if depreciation is None:
+                depreciation = 0.0
         else:
             depreciation = calculator2(
                 cost,
@@ -104,6 +106,8 @@ def calculate_depreciation(far_df, period_start, period_end, method):
                 period_end,
                 rate
             )
+            if depreciation is None:
+                depreciation = 0.0
 
         results_list.append({
             "Asset ID": asset_id,
