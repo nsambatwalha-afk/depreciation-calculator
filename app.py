@@ -135,12 +135,9 @@ def calculate_depreciation(far_df, period_start, period_end, method, disposal_df
     category_totals = {}
     accumulated_by_category = {}
 
-    # Build a lookup of disposed assets: {asset_id: disposal_date}
-    disposed_assets = {}
-    if disposal_df is not None:
-        for _, row in disposal_df.iterrows():
-            disposed_assets[str(row["Asset ID"])] = row["Disposal Date"].date()
-
+    # --------------------------------------------------
+    # ACTIVE ASSETS — from the FAR (no disposals here)
+    # --------------------------------------------------
     for _, row in far_df.iterrows():
 
         asset_id = row["Asset ID"]
@@ -151,64 +148,35 @@ def calculate_depreciation(far_df, period_start, period_end, method, disposal_df
 
         acquisition_date = row["Acquisition Date"].date()
 
-        disposal_date = disposed_assets.get(str(asset_id))
-        is_disposed = disposal_date is not None
-
-        # --------------------------------------------------
-        # PERIOD DEPRECIATION CHARGE
-        # --------------------------------------------------
-        if is_disposed and disposal_date < period_start:
-            # Disposed before this period — no charge
-            depreciation = 0.0
-        elif is_disposed and disposal_date <= period_end:
-            # Disposed during this period — charge only up to disposal date
-            if method == "Straight Line":
-                depreciation = calculator(
-                    cost, acquisition_date, period_start, disposal_date, rate
-                )
-            else:
-                depreciation = calculator2(
-                    cost, acquisition_date, period_start, disposal_date, rate
-                )
+        # Full period depreciation charge
+        if method == "Straight Line":
+            depreciation = calculator(
+                cost, acquisition_date, period_start, period_end, rate
+            )
         else:
-            # Active asset — full period charge
-            if method == "Straight Line":
-                depreciation = calculator(
-                    cost, acquisition_date, period_start, period_end, rate
-                )
-            else:
-                depreciation = calculator2(
-                    cost, acquisition_date, period_start, period_end, rate
-                )
+            depreciation = calculator2(
+                cost, acquisition_date, period_start, period_end, rate
+            )
 
         if depreciation is None:
             depreciation = 0.0
 
-        # --------------------------------------------------
-        # ACCUMULATED DEPRECIATION
-        # Disposed assets are removed from the books, so their
-        # accumulated depreciation is excluded from the closing balance.
-        # --------------------------------------------------
-        if is_disposed:
-            accumulated_dep = 0.0
+        # Accumulated depreciation to period end
+        if method == "Straight Line":
+            accumulated_dep = calc_accumulated_sl(
+                cost, acquisition_date, period_end, rate
+            )
         else:
-            if method == "Straight Line":
-                accumulated_dep = calc_accumulated_sl(
-                    cost, acquisition_date, period_end, rate
-                )
-            else:
-                accumulated_dep = calc_accumulated_rb(
-                    cost, acquisition_date, period_end, rate
-                )
-
-        status = "Disposed" if is_disposed else "Active"
+            accumulated_dep = calc_accumulated_rb(
+                cost, acquisition_date, period_end, rate
+            )
 
         results_list.append({
             "Asset ID": asset_id,
             "Asset Name": asset_name,
             "Asset Category": category,
             "Cost": cost,
-            "Status": status,
+            "Status": "Active",
             "Depreciation Charge": depreciation,
             "Accumulated Depreciation": accumulated_dep
         })
@@ -219,6 +187,70 @@ def calculate_depreciation(far_df, period_start, period_end, method, disposal_df
 
         category_totals[category] += depreciation
         accumulated_by_category[category] += accumulated_dep
+
+    # --------------------------------------------------
+    # DISPOSED ASSETS — from the disposal schedule
+    # Disposed assets are removed from the books, so their
+    # accumulated depreciation is excluded from the closing balance.
+    # --------------------------------------------------
+    if disposal_df is not None:
+        for _, row in disposal_df.iterrows():
+
+            asset_id = row["Asset ID"]
+            asset_name = row["Asset Name"]
+            category = row["Asset Category"]
+            cost = row["Cost"]
+            rate = row["Rate"]
+
+            acquisition_date = row["Acquisition Date"].date()
+            disposal_date = row["Disposal Date"].date()
+
+            if disposal_date < period_start:
+                # Disposed before this period — no charge, not on books
+                depreciation = 0.0
+            elif disposal_date <= period_end:
+                # Disposed during this period — charge only up to disposal date
+                if method == "Straight Line":
+                    depreciation = calculator(
+                        cost, acquisition_date, period_start, disposal_date, rate
+                    )
+                else:
+                    depreciation = calculator2(
+                        cost, acquisition_date, period_start, disposal_date, rate
+                    )
+            else:
+                # Disposal date falls after the period — asset was active for the full period
+                if method == "Straight Line":
+                    depreciation = calculator(
+                        cost, acquisition_date, period_start, period_end, rate
+                    )
+                else:
+                    depreciation = calculator2(
+                        cost, acquisition_date, period_start, period_end, rate
+                    )
+
+            if depreciation is None:
+                depreciation = 0.0
+
+            # Disposed assets carry no accumulated depreciation on the closing balance
+            accumulated_dep = 0.0
+
+            results_list.append({
+                "Asset ID": asset_id,
+                "Asset Name": asset_name,
+                "Asset Category": category,
+                "Cost": cost,
+                "Status": "Disposed",
+                "Depreciation Charge": depreciation,
+                "Accumulated Depreciation": accumulated_dep
+            })
+
+            if category not in category_totals:
+                category_totals[category] = 0
+                accumulated_by_category[category] = 0
+
+            category_totals[category] += depreciation
+            accumulated_by_category[category] += accumulated_dep
 
     results = pd.DataFrame(results_list)
 
@@ -246,14 +278,13 @@ def generate_fixed_asset_schedule(far_df, disposal_df, period_start, period_end,
     Value by asset category.  Returns the schedule as Excel (.xlsx) bytes.
     """
 
-    # Build a lookup of disposed assets: {asset_id: disposal_date}
-    disposed_assets = {}
-    if disposal_df is not None:
-        for _, row in disposal_df.iterrows():
-            disposed_assets[str(row["Asset ID"])] = row["Disposal Date"].date()
-
-    # Preserve the order categories appear in the FAR
+    # Preserve the order categories appear in the FAR, then append any
+    # additional categories that appear only in the disposal schedule.
     categories = list(far_df["Asset Category"].unique())
+    if disposal_df is not None:
+        for cat in disposal_df["Asset Category"].unique():
+            if cat not in categories:
+                categories.append(cat)
 
     # Per-category schedule data
     sched = {
@@ -268,59 +299,92 @@ def generate_fixed_asset_schedule(far_df, disposal_df, period_start, period_end,
         for cat in categories
     }
 
+    # ------ ACTIVE ASSETS — from the FAR (no disposals here) ------
     for _, row in far_df.iterrows():
-        asset_id = str(row["Asset ID"])
         category = row["Asset Category"]
         cost = row["Cost"]
         rate = row["Rate"]
         acquisition_date = row["Acquisition Date"].date()
 
-        disposal_date = disposed_assets.get(asset_id)
-        disposed_before_period = disposal_date is not None and disposal_date < period_start
-        disposed_during_period = (
-            disposal_date is not None
-            and period_start <= disposal_date <= period_end
-        )
         acquired_before_period = acquisition_date < period_start
         acquired_during_period = period_start <= acquisition_date <= period_end
 
-        # ------ COST ------
-        if acquired_before_period and not disposed_before_period:
+        # COST
+        if acquired_before_period:
             sched[category]["cost_opening"] += cost
         if acquired_during_period:
             sched[category]["cost_additions"] += cost
-        if disposed_during_period:
-            sched[category]["cost_disposals"] += cost
 
-        # ------ ACCUMULATED DEPRECIATION: OPENING ------
-        if acquired_before_period and not disposed_before_period:
+        # ACCUMULATED DEPRECIATION: OPENING
+        if acquired_before_period:
             if method == "Straight Line":
                 accum_open = calc_accumulated_sl(cost, acquisition_date, period_start, rate)
             else:
                 accum_open = calc_accumulated_rb(cost, acquisition_date, period_start, rate)
             sched[category]["accum_dep_opening"] += accum_open
 
-        # ------ DEPRECIATION CHARGE FOR THE PERIOD ------
-        if not disposed_before_period:
+        # DEPRECIATION CHARGE FOR THE PERIOD (full period — asset is active)
+        if method == "Straight Line":
+            dep = calculator(cost, acquisition_date, period_start, period_end, rate)
+        else:
+            dep = calculator2(cost, acquisition_date, period_start, period_end, rate)
+        sched[category]["dep_charge"] += dep or 0.0
+
+    # ------ DISPOSED ASSETS — from the disposal schedule ------
+    if disposal_df is not None:
+        for _, row in disposal_df.iterrows():
+            category = row["Asset Category"]
+            cost = row["Cost"]
+            rate = row["Rate"]
+            acquisition_date = row["Acquisition Date"].date()
+            disposal_date = row["Disposal Date"].date()
+
+            disposed_before_period = disposal_date < period_start
+            disposed_during_period = period_start <= disposal_date <= period_end
+            acquired_before_period = acquisition_date < period_start
+            acquired_during_period = period_start <= acquisition_date <= period_end
+
+            if disposed_before_period:
+                # Already disposed before this period — nothing to report
+                continue
+
+            # COST
+            if acquired_before_period:
+                sched[category]["cost_opening"] += cost
+            if acquired_during_period:
+                sched[category]["cost_additions"] += cost
+            if disposed_during_period:
+                sched[category]["cost_disposals"] += cost
+
+            # ACCUMULATED DEPRECIATION: OPENING
+            if acquired_before_period:
+                if method == "Straight Line":
+                    accum_open = calc_accumulated_sl(cost, acquisition_date, period_start, rate)
+                else:
+                    accum_open = calc_accumulated_rb(cost, acquisition_date, period_start, rate)
+                sched[category]["accum_dep_opening"] += accum_open
+
+            # DEPRECIATION CHARGE FOR THE PERIOD
             if disposed_during_period:
                 if method == "Straight Line":
                     dep = calculator(cost, acquisition_date, period_start, disposal_date, rate)
                 else:
                     dep = calculator2(cost, acquisition_date, period_start, disposal_date, rate)
             else:
+                # Disposal date falls after period end — asset active for the full period
                 if method == "Straight Line":
                     dep = calculator(cost, acquisition_date, period_start, period_end, rate)
                 else:
                     dep = calculator2(cost, acquisition_date, period_start, period_end, rate)
             sched[category]["dep_charge"] += dep or 0.0
 
-        # ------ ACCUMULATED DEPRECIATION REVERSED ON DISPOSAL ------
-        if disposed_during_period:
-            if method == "Straight Line":
-                accum_disp = calc_accumulated_sl(cost, acquisition_date, disposal_date, rate)
-            else:
-                accum_disp = calc_accumulated_rb(cost, acquisition_date, disposal_date, rate)
-            sched[category]["accum_dep_on_disposal"] += accum_disp
+            # ACCUMULATED DEPRECIATION REVERSED ON DISPOSAL
+            if disposed_during_period:
+                if method == "Straight Line":
+                    accum_disp = calc_accumulated_sl(cost, acquisition_date, disposal_date, rate)
+                else:
+                    accum_disp = calc_accumulated_rb(cost, acquisition_date, disposal_date, rate)
+                sched[category]["accum_dep_on_disposal"] += accum_disp
 
     # Derive closing balances and net book values
     for cat in categories:
@@ -522,8 +586,9 @@ if uploaded_file:
     # ----------------------------------------------------
     st.subheader("Disposed Assets (Optional)")
     st.write(
-        "Upload the filled disposal template to exclude disposed assets from "
-        "accumulated depreciation and adjust period depreciation charges accordingly."
+        "Upload the filled disposal template for assets that have been disposed of. "
+        "These assets will be included in the opening balance of the assets schedule "
+        "and removed as disposals in the period they were disposed."
     )
 
     disposal_file = st.file_uploader(
