@@ -1,5 +1,10 @@
+import io
+
 import streamlit as st
 import pandas as pd
+import openpyxl
+from openpyxl.styles import Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 from datetime import date
 from datetime import timedelta
 
@@ -232,6 +237,208 @@ def calculate_depreciation(far_df, period_start, period_end, method, disposal_df
 
 
 # ----------------------------------------------------
+# FIXED ASSET SCHEDULE (NOTES TO FINANCIAL STATEMENTS)
+# ----------------------------------------------------
+def generate_fixed_asset_schedule(far_df, disposal_df, period_start, period_end, method):
+    """
+    Generate the fixed asset schedule as normally prepared in the notes to the
+    financial statements, covering Cost, Accumulated Depreciation and Net Book
+    Value by asset category.  Returns the schedule as Excel (.xlsx) bytes.
+    """
+
+    # Build a lookup of disposed assets: {asset_id: disposal_date}
+    disposed_assets = {}
+    if disposal_df is not None:
+        for _, row in disposal_df.iterrows():
+            disposed_assets[str(row["Asset ID"])] = row["Disposal Date"].date()
+
+    # Preserve the order categories appear in the FAR
+    categories = list(far_df["Asset Category"].unique())
+
+    # Per-category schedule data
+    sched = {
+        cat: {
+            "cost_opening": 0.0,
+            "cost_additions": 0.0,
+            "cost_disposals": 0.0,
+            "accum_dep_opening": 0.0,
+            "dep_charge": 0.0,
+            "accum_dep_on_disposal": 0.0,
+        }
+        for cat in categories
+    }
+
+    for _, row in far_df.iterrows():
+        asset_id = str(row["Asset ID"])
+        category = row["Asset Category"]
+        cost = row["Cost"]
+        rate = row["Rate"]
+        acquisition_date = row["Acquisition Date"].date()
+
+        disposal_date = disposed_assets.get(asset_id)
+        disposed_before_period = disposal_date is not None and disposal_date < period_start
+        disposed_during_period = (
+            disposal_date is not None
+            and period_start <= disposal_date <= period_end
+        )
+        acquired_before_period = acquisition_date < period_start
+        acquired_during_period = period_start <= acquisition_date <= period_end
+
+        # ------ COST ------
+        if acquired_before_period and not disposed_before_period:
+            sched[category]["cost_opening"] += cost
+        if acquired_during_period:
+            sched[category]["cost_additions"] += cost
+        if disposed_during_period:
+            sched[category]["cost_disposals"] += cost
+
+        # ------ ACCUMULATED DEPRECIATION: OPENING ------
+        if acquired_before_period and not disposed_before_period:
+            if method == "Straight Line":
+                accum_open = calc_accumulated_sl(cost, acquisition_date, period_start, rate)
+            else:
+                accum_open = calc_accumulated_rb(cost, acquisition_date, period_start, rate)
+            sched[category]["accum_dep_opening"] += accum_open
+
+        # ------ DEPRECIATION CHARGE FOR THE PERIOD ------
+        if not disposed_before_period:
+            if disposed_during_period:
+                if method == "Straight Line":
+                    dep = calculator(cost, acquisition_date, period_start, disposal_date, rate)
+                else:
+                    dep = calculator2(cost, acquisition_date, period_start, disposal_date, rate)
+            else:
+                if method == "Straight Line":
+                    dep = calculator(cost, acquisition_date, period_start, period_end, rate)
+                else:
+                    dep = calculator2(cost, acquisition_date, period_start, period_end, rate)
+            sched[category]["dep_charge"] += dep or 0.0
+
+        # ------ ACCUMULATED DEPRECIATION REVERSED ON DISPOSAL ------
+        if disposed_during_period:
+            if method == "Straight Line":
+                accum_disp = calc_accumulated_sl(cost, acquisition_date, disposal_date, rate)
+            else:
+                accum_disp = calc_accumulated_rb(cost, acquisition_date, disposal_date, rate)
+            sched[category]["accum_dep_on_disposal"] += accum_disp
+
+    # Derive closing balances and net book values
+    for cat in categories:
+        d = sched[cat]
+        d["cost_closing"] = d["cost_opening"] + d["cost_additions"] - d["cost_disposals"]
+        d["accum_dep_closing"] = (
+            d["accum_dep_opening"] + d["dep_charge"] - d["accum_dep_on_disposal"]
+        )
+        d["nbv_opening"] = d["cost_opening"] - d["accum_dep_opening"]
+        d["nbv_closing"] = d["cost_closing"] - d["accum_dep_closing"]
+
+    # ------ BUILD EXCEL WORKBOOK ------
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Fixed Asset Schedule"
+
+    num_cats = len(categories)
+    last_col = num_cats + 2  # label col + one col per category + Total col
+
+    # Styles
+    title_font = Font(bold=True, size=14)
+    section_font = Font(bold=True)
+    closing_font = Font(bold=True)
+    center_align = Alignment(horizontal="center")
+    right_align = Alignment(horizontal="right")
+    thin_side = Side(style="thin")
+    thick_side = Side(style="medium")
+    num_fmt = "#,##0.00;(#,##0.00)"
+
+    # ----- Row 1: Title -----
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=last_col)
+    cell = ws.cell(row=1, column=1, value="PROPERTY, PLANT AND EQUIPMENT")
+    cell.font = title_font
+    cell.alignment = center_align
+
+    # ----- Row 2: Period subtitle -----
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=last_col)
+    cell = ws.cell(
+        row=2, column=1,
+        value=(
+            f"For the period {period_start.strftime('%d %B %Y')} "
+            f"to {period_end.strftime('%d %B %Y')} "
+            f"({method} method)"
+        ),
+    )
+    cell.alignment = center_align
+
+    # ----- Row 3: blank -----
+
+    # ----- Row 4: Column headers -----
+    ws.cell(row=4, column=1, value="")
+    for i, cat in enumerate(categories):
+        cell = ws.cell(row=4, column=2 + i, value=cat)
+        cell.font = section_font
+        cell.alignment = center_align
+    cell = ws.cell(row=4, column=last_col, value="Total")
+    cell.font = section_font
+    cell.alignment = center_align
+    for c in range(1, last_col + 1):
+        ws.cell(row=4, column=c).border = Border(bottom=thin_side)
+
+    # Helper: write a data row
+    def write_data_row(row_num, label, field_key, negate=False, bold_row=False):
+        label_cell = ws.cell(row=row_num, column=1, value=label)
+        if bold_row:
+            label_cell.font = closing_font
+            label_cell.border = Border(top=thin_side, bottom=thick_side)
+
+        row_total = 0.0
+        for i, cat in enumerate(categories):
+            val = sched[cat][field_key]
+            if negate:
+                val = -val
+            row_total += val
+            cell = ws.cell(row=row_num, column=2 + i, value=val)
+            cell.number_format = num_fmt
+            cell.alignment = right_align
+            if bold_row:
+                cell.font = closing_font
+                cell.border = Border(top=thin_side, bottom=thick_side)
+
+        total_cell = ws.cell(row=row_num, column=last_col, value=row_total)
+        total_cell.number_format = num_fmt
+        total_cell.alignment = right_align
+        if bold_row:
+            total_cell.font = closing_font
+            total_cell.border = Border(top=thin_side, bottom=thick_side)
+
+    # ----- COST section -----
+    ws.cell(row=5, column=1, value="COST").font = section_font
+    write_data_row(6, "Opening balance", "cost_opening")
+    write_data_row(7, "Additions", "cost_additions")
+    write_data_row(8, "Disposals", "cost_disposals", negate=True)
+    write_data_row(9, "Closing balance", "cost_closing", bold_row=True)
+
+    # ----- ACCUMULATED DEPRECIATION section -----
+    ws.cell(row=11, column=1, value="ACCUMULATED DEPRECIATION").font = section_font
+    write_data_row(12, "Opening balance", "accum_dep_opening")
+    write_data_row(13, "Charge for the period", "dep_charge")
+    write_data_row(14, "On disposals", "accum_dep_on_disposal", negate=True)
+    write_data_row(15, "Closing balance", "accum_dep_closing", bold_row=True)
+
+    # ----- NET BOOK VALUE section -----
+    ws.cell(row=17, column=1, value="NET BOOK VALUE").font = section_font
+    write_data_row(18, "Opening balance", "nbv_opening")
+    write_data_row(19, "Closing balance", "nbv_closing", bold_row=True)
+
+    # Column widths
+    ws.column_dimensions[get_column_letter(1)].width = 30
+    for c in range(2, last_col + 1):
+        ws.column_dimensions[get_column_letter(c)].width = 18
+
+    output = io.BytesIO()
+    wb.save(output)
+    return output.getvalue()
+
+
+# ----------------------------------------------------
 # UI
 # ----------------------------------------------------
 st.title("Asset Depreciation Calculator")
@@ -421,3 +628,17 @@ if uploaded_file:
                 file_name="far_with_depreciation.csv",
                 mime="text/csv"
             )
+
+        st.subheader("Fixed Asset Schedule")
+        st.write(
+            "Download the fixed asset schedule as prepared in the notes to the financial statements."
+        )
+        schedule_bytes = generate_fixed_asset_schedule(
+            far_df, disposal_df, period_start, period_end, method
+        )
+        st.download_button(
+            label="Download Fixed Asset Schedule",
+            data=schedule_bytes,
+            file_name="fixed_asset_schedule.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
