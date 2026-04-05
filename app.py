@@ -206,8 +206,8 @@ def calculate_depreciation(far_df, period_start, period_end, method, disposal_df
             disposal_date = row["Disposal Date"].date()
 
             if disposal_date < period_start:
-                # Disposed before this period — no charge, not on books
-                depreciation = 0.0
+                # Disposed before this period — not relevant to this period
+                continue
             elif disposal_date <= period_end:
                 # Disposed during this period — charge only up to disposal date
                 if method == "Straight Line":
