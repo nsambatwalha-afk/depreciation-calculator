@@ -530,7 +530,7 @@ with open("disposal_template.xlsx", "rb") as file:
 st.download_button(
     label="Download Disposal Template",
     data=disposal_template_bytes,
-    file_name="disposal_template.xlsx",
+    file_name="disposal_input.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
